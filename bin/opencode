@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  printf 'opencode-worktree: %s\n' "$*" >&2
+  exit 1
+}
+
+is_opencode_command() {
+  case "$1" in
+    completion | acp | mcp | run | debug | providers | auth | agent | upgrade | uninstall | serve | web | models | stats | export | import | github | pr | session | plugin | plug | db)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+find_real_opencode() {
+  if [[ -n "${OPENCODE_REAL_BIN:-}" ]]; then
+    [[ -x "$OPENCODE_REAL_BIN" ]] || die "OPENCODE_REAL_BIN is not executable: $OPENCODE_REAL_BIN"
+    printf '%s\n' "$OPENCODE_REAL_BIN"
+    return
+  fi
+
+  if [[ -x "$HOME/.opencode/bin/opencode" ]]; then
+    printf '%s\n' "$HOME/.opencode/bin/opencode"
+    return
+  fi
+
+  local dir candidate
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || dir=.
+    candidate="$dir/opencode"
+    [[ -x "$candidate" ]] || continue
+    [[ "$candidate" == "$HOME/.local/bin/opencode" ]] && continue
+    [[ "$candidate" == "${BASH_SOURCE[0]}" ]] && continue
+    printf '%s\n' "$candidate"
+    return
+  done < <(printf '%s' "$PATH" | tr ':' '\n')
+
+  die "real opencode binary not found; set OPENCODE_REAL_BIN"
+}
+
+slugify() {
+  local slug
+  slug=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs 'a-z0-9._-' '-')
+  while [[ "$slug" == -* ]]; do slug=${slug#-}; done
+  while [[ "$slug" == *- ]]; do slug=${slug%-}; done
+  [[ -n "$slug" ]] || die "worktree name must contain a letter or number"
+  printf '%s\n' "$slug"
+}
+
+generated_name() {
+  local adjectives=(brisk calm clever crisp eager lucid nimble quiet vivid warm)
+  local nouns=(cedar comet falcon harbor maple orbit otter quartz river willow)
+  printf '%s-%s-%04d\n' \
+    "${adjectives[RANDOM % ${#adjectives[@]}]}" \
+    "${nouns[RANDOM % ${#nouns[@]}]}" \
+    "$((RANDOM % 10000))"
+}
+
+registered_worktree() {
+  local target=$1 line
+  while IFS= read -r line; do
+    [[ "$line" == "worktree $target" ]] && return 0
+  done < <(git worktree list --porcelain)
+  return 1
+}
+
+exclude_local_worktree_root() {
+  local main_root=$1 worktree_root=$2 relative common exclude pattern line
+  [[ "$worktree_root" == "$main_root/"* ]] || return 0
+
+  relative=${worktree_root#"$main_root/"}
+  common=$(git -C "$main_root" rev-parse --git-common-dir)
+  [[ "$common" == /* ]] || common="$main_root/$common"
+  exclude="$common/info/exclude"
+  pattern="/${relative%/}/"
+
+  mkdir -p "${exclude%/*}"
+  touch "$exclude"
+  while IFS= read -r line; do
+    [[ "$line" == "$pattern" ]] && return 0
+  done < "$exclude"
+  printf '%s\n' "$pattern" >> "$exclude"
+}
+
+config=${OPENCODE_WORKTREE_CONFIG:-"$HOME/.config/opencode/worktree.conf"}
+if [[ -r "$config" ]]; then
+  # This is a user-owned shell config, matching the env-file convention used
+  # by other CLI launchers.
+  # shellcheck source=/dev/null
+  source "$config"
+fi
+real_opencode=$(find_real_opencode)
+
+if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
+  status=0
+  "$real_opencode" "$@" || status=$?
+  cat <<'EOF'
+
+Worktree extension:
+  -w, --worktree [name]  Create or reopen an isolated git worktree for this session
+EOF
+  exit "$status"
+fi
+
+want_worktree=false
+worktree_name=
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --worktree=*)
+      want_worktree=true
+      worktree_name=${1#*=}
+      [[ -n "$worktree_name" ]] || die "--worktree= requires a name"
+      ;;
+    -w | --worktree)
+      want_worktree=true
+      if [[ $# -gt 1 && "$2" != -* ]] && ! is_opencode_command "$2"; then
+        worktree_name=$2
+        shift
+      fi
+      ;;
+    *)
+      args+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if [[ "$want_worktree" == false ]]; then
+  exec "$real_opencode" "${args[@]}"
+fi
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "-w must be run inside a git worktree"
+current_head=$(git rev-parse HEAD)
+main_root=
+while IFS= read -r line; do
+  if [[ "$line" == worktree\ * ]]; then
+    main_root=${line#worktree }
+    break
+  fi
+done < <(git worktree list --porcelain)
+[[ -n "$main_root" ]] || die "could not locate the repository's main worktree"
+
+worktree_name=$(slugify "${worktree_name:-$(generated_name)}")
+worktree_dir=${OPENCODE_WORKTREE_DIR:-.worktrees}
+branch_prefix=${OPENCODE_WORKTREE_BRANCH_PREFIX:-worktree-}
+if [[ "$worktree_dir" == /* ]]; then
+  worktree_root=${worktree_dir%/}
+else
+  worktree_root="$main_root/${worktree_dir%/}"
+fi
+worktree_path="$worktree_root/$worktree_name"
+branch="$branch_prefix$worktree_name"
+
+exclude_local_worktree_root "$main_root" "$worktree_root"
+mkdir -p "$worktree_root"
+
+if registered_worktree "$worktree_path"; then
+  printf 'Reusing OpenCode worktree %s (%s)\n' "$worktree_path" "$branch" >&2
+elif [[ -e "$worktree_path" ]]; then
+  die "path exists but is not a registered git worktree: $worktree_path"
+elif git show-ref --verify --quiet "refs/heads/$branch"; then
+  git worktree add "$worktree_path" "$branch" >&2
+else
+  git worktree add -b "$branch" "$worktree_path" "$current_head" >&2
+fi
+
+printf 'OpenCode worktree: %s\n' "$worktree_path" >&2
+cd "$worktree_path"
+exec "$real_opencode" "${args[@]}"
