@@ -64,6 +64,14 @@ log=$(<"$OPENCODE_TEST_LOG")
 assert_contains "$log" 'arg=run'
 assert_contains "$log" 'arg=say hello'
 
+(
+  cd "$TMP/repo"
+  "$SCRIPT" -w attach https://opencode.example
+)
+log=$(<"$OPENCODE_TEST_LOG")
+assert_contains "$log" 'arg=attach'
+assert_contains "$log" 'arg=https://opencode.example'
+
 # Without -w, cwd and arguments pass through unchanged.
 (
   cd "$TMP/repo"

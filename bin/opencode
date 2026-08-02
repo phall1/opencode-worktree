@@ -8,7 +8,7 @@ die() {
 
 is_opencode_command() {
   case "$1" in
-    completion | acp | mcp | run | debug | providers | auth | agent | upgrade | uninstall | serve | web | models | stats | export | import | github | pr | session | plugin | plug | db)
+    completion | acp | mcp | attach | run | debug | providers | auth | agent | upgrade | uninstall | serve | web | models | stats | export | import | github | pr | session | plugin | plug | db)
       return 0
       ;;
     *)
