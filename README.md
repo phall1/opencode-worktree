@@ -47,8 +47,14 @@ even when `opencode -w` is invoked from another linked worktree.
 
 ```sh
 tests/test.sh
-shellcheck bin/opencode tests/test.sh
+OPENCODE_REAL_BIN="$(command -v opencode)" tests/latest-opencode.sh
+shellcheck bin/opencode tests/*.sh
 ```
+
+GitHub Actions installs `opencode-ai@latest` and runs the compatibility smoke
+daily and on every change. A failure creates or updates one compatibility issue
+with the OpenCode version, workflow/artifact links, reproduction commands, and
+the captured log tail so an agent can start the repair immediately.
 
 ## Why a shim?
 

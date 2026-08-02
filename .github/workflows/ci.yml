@@ -1,21 +1,115 @@
-name: ci
+name: latest-opencode
 
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
+  issues: write
+
+concurrency:
+  group: latest-opencode-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  compatibility:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Lint
-        run: shellcheck bin/opencode tests/test.sh
-      - name: Test
-        run: tests/test.sh
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Verify opencode -w against latest OpenCode
+        id: compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee latest-opencode-smoke.log) 2>&1
+          npm install --global opencode-ai@latest
+          version=$(opencode --version)
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          OPENCODE_REAL_BIN=$(command -v opencode) tests/latest-opencode.sh
+
+      - name: Upload compatibility log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: latest-opencode-smoke-${{ github.run_id }}
+          path: latest-opencode-smoke.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: File or update compatibility issue
+        if: failure() && github.event_name != 'pull_request'
+        uses: actions/github-script@v8
+        env:
+          OPENCODE_VERSION: ${{ steps.compatibility.outputs.version }}
+        with:
+          script: |
+            const fs = require("fs")
+            const title = "[compat] opencode -w broken against latest OpenCode"
+            const marker = `<!-- opencode-worktree-compat-run:${context.runId} -->`
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            const version = process.env.OPENCODE_VERSION || "unknown (install or version probe failed)"
+            let log = "Compatibility log was not created. Inspect the workflow run."
+            if (fs.existsSync("latest-opencode-smoke.log")) {
+              const full = fs.readFileSync("latest-opencode-smoke.log", "utf8")
+              log = full.slice(-12000)
+            }
+            const body = `${marker}
+            ## Latest OpenCode compatibility failure
+
+            - **OpenCode version:** \`${version}\`
+            - **Shim commit:** \`${context.sha}\`
+            - **Workflow run and downloadable artifact:** ${runUrl}
+            - **Event:** \`${context.eventName}\`
+            - **Runner:** \`ubuntu-latest\`
+
+            ### Reproduce
+
+            \`\`\`bash
+            npm install --global opencode-ai@latest
+            OPENCODE_REAL_BIN=$(command -v opencode) tests/latest-opencode.sh
+            \`\`\`
+
+            ### Agent handoff
+
+            Start from this issue and the linked run. Reproduce with the commands above, compare the latest OpenCode CLI behavior with \`bin/opencode\`, update the shim and regression coverage, then ensure this workflow passes before closing the issue.
+
+            <details><summary>Captured log tail</summary>
+
+            \`\`\`text
+            ${log}
+            \`\`\`
+            </details>`
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            })
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title)
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              })
+              core.notice(`Updated compatibility issue #${existing.number}`)
+            } else {
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              })
+              core.notice(`Created compatibility issue #${issue.number}`)
+            }
