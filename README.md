@@ -51,10 +51,13 @@ OPENCODE_REAL_BIN="$(command -v opencode)" tests/latest-opencode.sh
 shellcheck bin/opencode tests/*.sh
 ```
 
-GitHub Actions installs `opencode-ai@latest` and runs the compatibility smoke
-daily and on every change. A failure creates or updates one compatibility issue
+GitHub Actions checks the npm `latest` version daily and on every change. A
+successful version + shim/test hash is cached, so unchanged releases skip the
+install and smoke entirely. A cache miss installs that exact release and runs
+the compatibility smoke. Failures create or update one compatibility issue
 with the OpenCode version, workflow/artifact links, reproduction commands, and
-the captured log tail so an agent can start the repair immediately.
+the captured log tail so an agent can start the repair immediately; successful
+runs do not retain log artifacts.
 
 ## Why a shim?
 

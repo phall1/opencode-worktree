@@ -21,23 +21,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Resolve latest OpenCode version
+        id: latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL https://registry.npmjs.org/opencode-ai/latest | jq -er .version)
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'Latest OpenCode: %s\n' "$version"
+
+      - name: Restore successful compatibility result
+        id: compatibility-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/latest-opencode
+          key: latest-opencode-${{ runner.os }}-${{ steps.latest.outputs.version }}-${{ hashFiles('bin/opencode', 'tests/latest-opencode.sh', '.github/workflows/ci.yml') }}
+
       - uses: actions/setup-node@v6
+        if: steps.compatibility-cache.outputs.cache-hit != 'true'
         with:
           node-version: 24
 
       - name: Verify opencode -w against latest OpenCode
         id: compatibility
+        if: steps.compatibility-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           exec > >(tee latest-opencode-smoke.log) 2>&1
-          npm install --global opencode-ai@latest
+          npm install --global opencode-ai@${{ steps.latest.outputs.version }}
           version=$(opencode --version)
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           OPENCODE_REAL_BIN=$(command -v opencode) tests/latest-opencode.sh
+          mkdir -p .cache/latest-opencode
+          printf '%s\n' "$version" > .cache/latest-opencode/passed
+
+      - name: Save successful compatibility result
+        if: success() && steps.compatibility-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/latest-opencode
+          key: ${{ steps.compatibility-cache.outputs.cache-primary-key }}
 
       - name: Upload compatibility log
-        if: always()
+        if: failure() && steps.compatibility.outcome == 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: latest-opencode-smoke-${{ github.run_id }}
@@ -49,7 +76,7 @@ jobs:
         if: failure() && github.event_name != 'pull_request'
         uses: actions/github-script@v8
         env:
-          OPENCODE_VERSION: ${{ steps.compatibility.outputs.version }}
+          OPENCODE_VERSION: ${{ steps.latest.outputs.version }}
         with:
           script: |
             const fs = require("fs")
@@ -67,7 +94,7 @@ jobs:
 
             - **OpenCode version:** \`${version}\`
             - **Shim commit:** \`${context.sha}\`
-            - **Workflow run and downloadable artifact:** ${runUrl}
+            - **Workflow run (with downloadable artifact when the smoke started):** ${runUrl}
             - **Event:** \`${context.eventName}\`
             - **Runner:** \`ubuntu-latest\`
 
